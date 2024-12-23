@@ -1,6 +1,8 @@
 import requests
 import pandas as pd
 import datetime as dt
+from snowflake.sqlalchemy import URL
+from sqlalchemy import create_engine
 
 def make_metabase_session(api_key: str) -> requests.Session:
     session = requests.Session()
@@ -60,7 +62,7 @@ def card_flagger(row):
     flag = False
     if row[['raw_hex', 'raw_fivetran', 'raw_stitch', 'raw_airbyte', 'raw_dataddo', 'raw_portable']].any():
         flag = True 
-    if row['db_name_x'] != 'data_prod':
+    if row['db_name'] != 'data_prod':
         flag = True 
     return flag 
 
@@ -107,15 +109,15 @@ def transform_metabase_cards(df: pd.DataFrame) -> pd.DataFrame:
         raw_db_usage[db] = raw_db_usage['raw_dbs_used'].apply(lambda x: db in x)
 
     df_with_raw_table_usage = df_without_metadata.merge(
-        raw_db_usage,
+        raw_db_usage[['card_id','raw_hex', 'raw_stitch', 'raw_fivetran', 'raw_airbyte', 'raw_portable', 'raw_dataddo']],
         left_on= 'card_id',
         right_on= 'card_id',
         how= 'left'
     ).copy()
 
     df_with_raw_table_usage['flagged'] = df_with_raw_table_usage.apply(card_flagger, axis = 1)
-    df_with_raw_table_usage['days_since_last_usage'] = (dt.datetime.now(dt.timezone.utc) - pd.to_datetime(df_with_raw_table_usage['last_used_at_x'])).dt.days
-    df_with_raw_table_usage['days_since_last_update'] = (dt.datetime.now(dt.timezone.utc) - pd.to_datetime(df_with_raw_table_usage['last_updated_at_x'])).dt.days
+    df_with_raw_table_usage['days_since_last_usage'] = (dt.datetime.now(dt.timezone.utc) - pd.to_datetime(df_with_raw_table_usage['last_used_at'])).dt.days
+    df_with_raw_table_usage['days_since_last_update'] = (dt.datetime.now(dt.timezone.utc) - pd.to_datetime(df_with_raw_table_usage['last_updated_at'])).dt.days
     
     bins = list(range(0, df_with_raw_table_usage['days_since_last_update'].max() + 100, 100))
     labels = [f'since {i}-{i+99} days' for i in range(0, (len(bins)-1) * 100, 100)]  
@@ -165,4 +167,21 @@ def archive_batch(df: pd.DataFrame, session: requests.Session, url: str) -> str:
     
     output = f"{len(archived)} cards were archived. {len(not_archived)} cards were NOT archived. Cards to try again: {not_archived}"
 
-    return output
+    return output, not_archived
+
+
+def store_archived_cards_into_snowflake(df, sf_password):
+    try:
+        engine = create_engine(URL(
+            user='HEX_USER',
+            password=sf_password,
+            account='tqb12823',
+            warehouse='DW_HEX_LOADER',
+            database='RAW_HEX',
+            schema='metabase'
+        ))
+
+        df.to_sql('cards_archived', engine=engine, if_exists='append')
+        return "Cards archived succesfully logged into snowflake"
+    except Exception as e:
+        return e
